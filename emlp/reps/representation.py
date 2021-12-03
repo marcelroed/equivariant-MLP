@@ -35,6 +35,7 @@ class Rep(object):
 
     def __init__(self):
         self.equivariant_projector = memory.cache(self.equivariant_projector)
+        self.equivariant_basis = memory.cache(self.equivariant_basis)
 
     def rho(self,M):
         """ Group representation of the matrix M of shape (d,d)"""
@@ -211,7 +212,8 @@ def mul_reps(ra:int,rb):
 
 # A possible
 class ScalarRep(Rep):
-    def __init__(self,G=None):
+    def __init__(self, G=None):
+        super().__init__()
         self.G=G
         self.is_permutation = True
     def __call__(self,G):
@@ -246,6 +248,7 @@ class ScalarRep(Rep):
 class Base(Rep):
     """ Base representation V of a group."""
     def __init__(self,G=None):
+        super().__init__()
         self.G=G
         if G is not None: self.is_permutation = G.is_permutation
     def __call__(self,G):
@@ -276,6 +279,7 @@ class Base(Rep):
 
 class Dual(Rep):
     def __init__(self,rep):
+        super().__init__()
         self.rep = rep
         self.G=rep.G
         if hasattr(rep,"is_permutation"): self.is_permutation = rep.is_permutation

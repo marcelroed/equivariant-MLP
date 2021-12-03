@@ -9,6 +9,7 @@ from .linear_operators import LazyPerm,LazyDirectSum,LazyKron,LazyKronsum,I,lazy
 from functools import reduce
 from collections import defaultdict
 from plum import dispatch
+from emlp.utils import memory
 
 class SumRep(Rep):
     def __init__(self,*reps,extra_perm=None):#repcounter,repperm=None):
@@ -146,11 +147,14 @@ class SumRep(Rep):
 def both_concrete(rep1,rep2):
     return all(rep.concrete for rep in (rep1,rep2) if hasattr(rep,'concrete'))
 
-@dispatch.multi((SumRep,Rep),(Rep,SumRep),(SumRep,SumRep))
-def mul_reps(ra,rb):
-    if not both_concrete(ra,rb):
-        return DeferredProductRep(ra,rb)
-    return distribute_product([ra,rb])
+
+@dispatch.multi((SumRep, Rep), (Rep, SumRep), (SumRep, SumRep))
+@memory.cache
+def mul_reps(ra, rb):
+    if not both_concrete(ra, rb):
+        return DeferredProductRep(ra, rb)
+    return distribute_product([ra, rb])
+
 
 @dispatch
 def mul_reps(ra,rb):  # base case
