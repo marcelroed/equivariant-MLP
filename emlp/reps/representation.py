@@ -10,7 +10,7 @@ from .linear_operators import ConcatLazy, I, lazify, densify, LazyJVP
 import logging
 import matplotlib.pyplot as plt
 from functools import reduce
-from emlp.utils import export
+from emlp.utils import export, memory
 
 from plum import dispatch
 import emlp.reps
@@ -18,7 +18,7 @@ import emlp.reps
 #TODO and simpler rep = flatten({Scalar:2,Vector:10,...}),
 # Do we even want + operator to implement non canonical orderings?
 
-__all__ = ["V","Vector", "Scalar"]
+__all__ = ["V", "Vector", "Scalar"]
 
 @export
 class Rep(object):
@@ -32,6 +32,9 @@ class Rep(object):
         At minimum, new representations need to implement ``rho``, ``__str__``."""
         
     is_permutation=False
+
+    def __init__(self):
+        self.equivariant_projector = memory.cache(self.equivariant_projector)
 
     def rho(self,M):
         """ Group representation of the matrix M of shape (d,d)"""
@@ -56,9 +59,17 @@ class Rep(object):
         d1 = tuple([(k,v) for k,v in self.__dict__.items() if (k not in ['_size','is_permutation','is_orthogonal'])])
         d2 = tuple([(k,v) for k,v in other.__dict__.items() if (k not in ['_size','is_permutation','is_orthogonal'])])
         return d1==d2
+
     def __hash__(self):
-        d1 = tuple([(k,v) for k,v in self.__dict__.items() if (k not in ['_size','is_permutation','is_orthogonal'])])
-        return hash((type(self),d1))
+        state_dict = self.__dict__.copy()
+
+        # Turn lists into tuples for hashing purposes
+        for k in list(state_dict.keys()):
+            if isinstance(state_dict[k], list):
+                state_dict[k] = tuple(state_dict[k])
+
+        d1 = tuple([(k, v) for k, v in state_dict.items() if (k not in ['_size', 'is_permutation', 'is_orthogonal'])])
+        return hash((type(self), d1))
 
     def size(self): 
         """ Dimension dim(V) of the representation """

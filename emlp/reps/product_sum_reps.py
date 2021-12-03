@@ -12,6 +12,7 @@ from plum import dispatch
 
 class SumRep(Rep):
     def __init__(self,*reps,extra_perm=None):#repcounter,repperm=None):
+        super().__init__()
         """ Constructs a tensor type based on a list of tensor ranks
             and possibly the symmetry generators gen."""
         # Integers can be used as shorthand for scalars.
@@ -243,6 +244,7 @@ def rep_permutation(repsizes_all):
 
 class ProductRep(Rep):
     def __init__(self,*reps,extra_perm=None,counter=None):
+        super().__init__()
         #Two variants of the constructor:
         if counter is not None: #one with counter specified directly
             self.reps=counter
@@ -394,6 +396,7 @@ class DirectProduct(ProductRep):
 
 class DeferredSumRep(Rep):
     def __init__(self,*reps):
+        super().__init__()
         self.to_sum=[]
         for rep in reps:
             #assert not isinstance(rep,SumRep),f"{rep} of type {type(rep)} tosum {self.to_sum}"
@@ -415,6 +418,7 @@ class DeferredSumRep(Rep):
 
 class DeferredProductRep(Rep):
     def __init__(self,*reps):
+        super().__init__()
         self.to_prod=[]
         for rep in reps:
             assert not isinstance(rep,ProductRep)

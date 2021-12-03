@@ -96,6 +96,7 @@ def test_bespoke_representations():
             """   Produces the representation of the subgroup of G = G1 x G2
                 with the index subgroup_id in {0,1} specifying G1 or G2.
                 Also requires specifying the size of the representation given by G1.d or G2.d """
+            super().__init__()
             self.G = G
             self.index = subgroup_id
             self._size = size

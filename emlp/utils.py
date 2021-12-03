@@ -1,4 +1,10 @@
 import sys
+from joblib import Memory
+from tempfile import gettempdir
+
+# Cross-platform location for joblib memory
+memory = Memory(cachedir=gettempdir(), verbose=1)
+
 
 class Named(type):
     def __str__(self):
