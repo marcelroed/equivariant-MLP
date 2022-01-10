@@ -69,19 +69,22 @@ def torchify_fn(function):
 @export
 class Linear(nn.Linear):
     """ Basic equivariant Linear layer from repin to repout."""
+
     def __init__(self, repin, repout):
-        nin,nout = repin.size(),repout.size()
-        super().__init__(nin,nout)
-        rep_W = repout*repin.T
+        from jax2torch import jax2torch
+        nin, nout = repin.size(), repout.size()
+        super().__init__(nin, nout)
+        rep_W = repout * repin.T
         rep_bias = repout
         Pw = rep_W.equivariant_projector()
         Pb = rep_bias.equivariant_projector()
-        self.proj_b = torchify_fn(jit(lambda b: Pb@b))
-        self.proj_w = torchify_fn(jit(lambda w:(Pw@w.reshape(-1)).reshape(nout,nin)))
+        self.proj_b = torchify_fn(jit(lambda b: Pb @ b))
+        self.proj_w = torchify_fn(jit(lambda w: (Pw @ w.reshape(-1)).reshape(nout, nin)))
         logging.info(f"Linear W components:{rep_W.size()} rep:{rep_W}")
 
-    def forward(self, x): # (cin) -> (cout)
-        return F.linear(x,self.proj_w(self.weight),self.proj_b(self.bias))
+    def forward(self, x):  # (cin) -> (cout)
+        # TODO: Port the projection to PyTorch
+        return F.linear(x, self.proj_w(self.weight), self.proj_b(self.bias))
 
 @export
 class BiLinear(nn.Module):

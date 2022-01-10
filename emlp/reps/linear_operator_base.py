@@ -158,7 +158,7 @@ class LinearOperator(object):
         define matrix multiplication (though in a very suboptimal way).
         """
 
-        return np.hstack([self.matvec(col.reshape(-1,1)) for col in X.T])
+        return np.hstack([self.matvec(col.reshape(-1, 1)) for col in X.T])
 
     def _matvec(self, x):
         """Default matrix-vector multiplication handler.
