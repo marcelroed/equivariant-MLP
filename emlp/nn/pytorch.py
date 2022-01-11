@@ -9,29 +9,33 @@ import jax.numpy as jnp
 import numpy as np
 import types
 from functools import partial
-from emlp.reps import T,Rep,Scalar
+from emlp.reps import T, Rep, Scalar
 from emlp.reps import bilinear_weights
-from emlp.utils import Named,export
+from emlp.utils import Named, export, dbg
 import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from emlp.nn import gated,gate_indices,uniform_rep
+from emlp.nn import gated, gate_indices, uniform_rep
+
 
 def torch2jax(arr):
-    if isinstance(arr,torch.Tensor):
+    if isinstance(arr, torch.Tensor):
         return jnp.asarray(arr.cpu().data.numpy())
     else:
         return arr
 
+
 def jax2torch(arr):
-    if isinstance(arr,(jnp.ndarray,np.ndarray)):
-        if jax.devices()[0].platform=='gpu':
-            device = torch.device('cuda') 
-        else: device = torch.device('cpu')
+    if isinstance(arr, (jnp.ndarray, np.ndarray)):
+        if jax.devices()[0].platform == 'gpu':
+            device = torch.device('cuda')
+        else:
+            device = torch.device('cpu')
         return torch.from_numpy(np.array(arr)).to(device)
     else:
         return arr
+
 
 def to_jax(pytree):
     flat_values, tree_type = tree_flatten(pytree)
@@ -44,6 +48,7 @@ def to_pytorch(pytree):
     transformed_flat = [jax2torch(v) for v in flat_values]
     return tree_unflatten(tree_type, transformed_flat)
 
+
 @export
 def torchify_fn(function):
     """ A method to enable interopability between jax and pytorch autograd.
@@ -52,18 +57,22 @@ def torchify_fn(function):
         the inputs to jax, runs through the jax function, and converts the output
         back to torch but preserving the gradients of the operation to be called
         with pytorch autograd. """
-    vjp = jit(lambda *args: jax.vjp(function,*args))
-    class torched_fn(Function):
+    vjp = jit(lambda *args: jax.vjp(function, *args))
+
+    class TorchedFn(Function):
         @staticmethod
-        def forward(ctx,*args):
+        def forward(ctx, *args):
             if any(ctx.needs_input_grad):
-                y,ctx.vjp_fn = vjp(*to_jax(args))#jax.vjp(function,*to_jax(args))
+                # Jax's vjp_fn returns a tuple of the output and the vjp function
+                y, ctx.vjp_fn = vjp(*to_jax(args))  # jax.vjp(function,*to_jax(args))
                 return to_pytorch(y)
             return to_pytorch(function(*to_jax(args)))
+
         @staticmethod
-        def backward(ctx,*grad_outputs):
+        def backward(ctx, *grad_outputs):
             return to_pytorch(ctx.vjp_fn(*to_jax(grad_outputs)))
-    return torched_fn.apply #TORCHED #Roasted
+
+    return TorchedFn.apply  # TORCHED #Roasted
 
 
 @export
@@ -76,60 +85,74 @@ class Linear(nn.Linear):
         super().__init__(nin, nout)
         rep_W = repout * repin.T
         rep_bias = repout
+        # Need to somehow save the projection function
         Pw = rep_W.equivariant_projector()
         Pb = rep_bias.equivariant_projector()
+        dbg(type(Pw), Pw)
+        dbg(type(Pb), Pb)
         self.proj_b = torchify_fn(jit(lambda b: Pb @ b))
         self.proj_w = torchify_fn(jit(lambda w: (Pw @ w.reshape(-1)).reshape(nout, nin)))
         logging.info(f"Linear W components:{rep_W.size()} rep:{rep_W}")
 
     def forward(self, x):  # (cin) -> (cout)
         # TODO: Port the projection to PyTorch
-        return F.linear(x, self.proj_w(self.weight), self.proj_b(self.bias))
+        dev = x.device
+        weight = self.proj_w(self.weight).cuda(device=dev)
+        bias = self.proj_b(self.bias).cuda(device=dev)
+        return F.linear(x, weight, bias)
+
 
 @export
 class BiLinear(nn.Module):
     """ Cheap bilinear layer (adds parameters for each part of the input which can be
         interpreted as a linear map from a part of the input to the output representation)."""
+
     def __init__(self, repin, repout):
         super().__init__()
-        Wdim, weight_proj = bilinear_weights(repout,repin)
+        Wdim, weight_proj = bilinear_weights(repout, repin)
         self.weight_proj = torchify_fn(jit(weight_proj))
         self.bi_params = nn.Parameter(torch.randn(Wdim))
         logging.info(f"BiW components: dim:{Wdim}")
 
-    def forward(self, x,training=True):
+    def forward(self, x, training=True):
         # compatible with non sumreps? need to check
-        W = self.weight_proj(self.bi_params,x)
-        out= .1*(W@x[...,None])[...,0]
+        W = self.weight_proj(self.bi_params, x).cuda()
+        out = .1 * (W @ x[..., None])[..., 0]
         return out
 
+
 @export
-class GatedNonlinearity(nn.Module): #TODO: add support for mixed tensors and non sumreps
+class GatedNonlinearity(nn.Module):  # TODO: add support for mixed tensors and non sumreps
     """ Gated nonlinearity. Requires input to have the additional gate scalars
         for every non regular and non scalar rep. Applies swish to regular and
         scalar reps. (Right now assumes rep is a SumRep)"""
-    def __init__(self,rep):
+
+    def __init__(self, rep):
         super().__init__()
-        self.rep=rep
-    def forward(self,values):
+        self.rep = rep
+
+    def forward(self, values):
         gate_scalars = values[..., gate_indices(self.rep)]
         activations = gate_scalars.sigmoid() * values[..., :self.rep.size()]
         return activations
+
 
 @export
 class EMLPBlock(nn.Module):
     """ Basic building block of EMLP consisting of G-Linear, biLinear,
         and gated nonlinearity. """
-    def __init__(self,rep_in,rep_out):
+
+    def __init__(self, rep_in, rep_out):
         super().__init__()
-        self.linear = Linear(rep_in,gated(rep_out))
-        self.bilinear = BiLinear(gated(rep_out),gated(rep_out))
+        self.linear = Linear(rep_in, gated(rep_out))
+        self.bilinear = BiLinear(gated(rep_out), gated(rep_out))
         self.nonlinearity = GatedNonlinearity(rep_out)
 
-    def forward(self,x):
+    def forward(self, x):
         lin = self.linear(x)
-        preact =self.bilinear(lin)+lin
+        preact = self.bilinear(lin) + lin
         return self.nonlinearity(preact)
+
 
 @export
 class EMLP(nn.Module):
@@ -148,53 +171,63 @@ class EMLP(nn.Module):
 
         Returns:
             Module: the EMLP objax module."""
-    def __init__(self,rep_in,rep_out,group,ch=384,num_layers=3):
+
+    def __init__(self, rep_in, rep_out, group, ch=384, num_layers=3):
         super().__init__()
         logging.info("Initing EMLP (PyTorch)")
-        self.rep_in =rep_in(group)
+        self.rep_in = rep_in(group)
         self.rep_out = rep_out(group)
-        
-        self.G=group
+
+        self.G = group
         # Parse ch as a single int, a sequence of ints, a single Rep, a sequence of Reps
-        if isinstance(ch,int): middle_layers = num_layers*[uniform_rep(ch,group)]#[uniform_rep(ch,group) for _ in range(num_layers)]
-        elif isinstance(ch,Rep): middle_layers = num_layers*[ch(group)]
-        else: middle_layers = [(c(group) if isinstance(c,Rep) else uniform_rep(c,group)) for c in ch]
-        #assert all((not rep.G is None) for rep in middle_layers[0].reps)
-        reps = [self.rep_in]+middle_layers
-        #logging.info(f"Reps: {reps}")
+        if isinstance(ch, int):
+            middle_layers = num_layers * [uniform_rep(ch, group)]  # [uniform_rep(ch,group) for _ in range(num_layers)]
+        elif isinstance(ch, Rep):
+            middle_layers = num_layers * [ch(group)]
+        else:
+            middle_layers = [(c(group) if isinstance(c, Rep) else uniform_rep(c, group)) for c in ch]
+        # assert all((not rep.G is None) for rep in middle_layers[0].reps)
+        reps = [self.rep_in] + middle_layers
+        # logging.info(f"Reps: {reps}")
         self.network = nn.Sequential(
-            *[EMLPBlock(rin,rout) for rin,rout in zip(reps,reps[1:])],
-            Linear(reps[-1],self.rep_out)
+            *[EMLPBlock(rin, rout) for rin, rout in zip(reps, reps[1:])],
+            Linear(reps[-1], self.rep_out)
         )
-    def forward(self,x):
+
+    def forward(self, x):
         return self.network(x)
 
-class Swish(nn.Module):
-    def forward(self,x):
-        return x.sigmoid()*x
 
-def MLPBlock(cin,cout):
-    return nn.Sequential(nn.Linear(cin,cout),Swish())#,nn.BatchNorm0D(cout,momentum=.9),swish)#,
+class Swish(nn.Module):
+    def forward(self, x):
+        return x.sigmoid() * x
+
+
+def MLPBlock(cin, cout):
+    return nn.Sequential(nn.Linear(cin, cout), Swish())  # ,nn.BatchNorm0D(cout,momentum=.9),swish)#,
+
 
 @export
 class MLP(nn.Module):
     """ Standard baseline MLP. Representations and group are used for shapes only. """
-    def __init__(self,rep_in,rep_out,group,ch=384,num_layers=3):
+
+    def __init__(self, rep_in, rep_out, group, ch=384, num_layers=3):
         super().__init__()
-        self.rep_in =rep_in(group)
+        self.rep_in = rep_in(group)
         self.rep_out = rep_out(group)
         self.G = group
-        chs = [self.rep_in.size()] + num_layers*[ch]
+        chs = [self.rep_in.size()] + num_layers * [ch]
         cout = self.rep_out.size()
         logging.info("Initing MLP")
         self.net = nn.Sequential(
-            *[MLPBlock(cin,cout) for cin,cout in zip(chs,chs[1:])],
-            nn.Linear(chs[-1],cout)
+            *[MLPBlock(cin, cout) for cin, cout in zip(chs, chs[1:])],
+            nn.Linear(chs[-1], cout)
         )
 
-    def forward(self,x):
+    def forward(self, x):
         y = self.net(x)
         return y
+
 
 @export
 class Standardize(nn.Module):
@@ -208,16 +241,17 @@ class Standardize(nn.Module):
         
         Returns:
             Module: Wrapped model with input normalization (and output unnormalization)"""
-    def __init__(self,model,ds_stats):
+
+    def __init__(self, model, ds_stats):
         super().__init__()
         self.model = model
-        self.ds_stats=ds_stats
+        self.ds_stats = ds_stats
 
-    def forward(self,x,training):
-        if len(self.ds_stats)==2:
-            muin,sin = self.ds_stats
-            return self.model((x-muin)/sin,training=training)
+    def forward(self, x, training):
+        if len(self.ds_stats) == 2:
+            muin, sin = self.ds_stats
+            return self.model((x - muin) / sin, training=training)
         else:
-            muin,sin,muout,sout = self.ds_stats
-            y = sout*self.model((x-muin)/sin,training=training)+muout
+            muin, sin, muout, sout = self.ds_stats
+            y = sout * self.model((x - muin) / sin, training=training) + muout
             return y
