@@ -10,6 +10,7 @@
 # # concatenate the __all__ from each of the submodules (expose to user)
 
 __version__ = '1.0.3'
+
 from .nn import *
 from .groups import *
 from .reps import *

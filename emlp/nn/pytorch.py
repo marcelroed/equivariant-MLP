@@ -1,16 +1,16 @@
 import torch
+from emlp.reps.product_sum_reps import SumRep
 from torch.autograd import Function
 import jax
 from jax import jit
 from jax.tree_util import tree_flatten, tree_unflatten
-import types
 import copy
 import jax.numpy as jnp
 import numpy as np
 import types
 from functools import partial
 from emlp.reps import T, Rep, Scalar
-from emlp.reps import bilinear_weights
+from emlp.reps import bilinear_weights, torch_bilinear_weights
 from emlp.utils import Named, export, dbg
 import logging
 import torch
@@ -75,52 +75,59 @@ def torchify_fn(function):
     return TorchedFn.apply  # TORCHED #Roasted
 
 
+def ensure_sum_rep(rep):
+    return rep if isinstance(rep, SumRep) else SumRep(rep)
+
 @export
-class Linear(nn.Linear):
+class EquivLinear(nn.Linear):
     """ Basic equivariant Linear layer from repin to repout."""
 
     def __init__(self, repin, repout):
         nin, nout = repin.size(), repout.size()
         super().__init__(nin, nout)
-        rep_W = repout * repin.T
-        rep_bias = repout
+        rep_W = ensure_sum_rep(repout * repin.T)
+        rep_bias = ensure_sum_rep(repout)
         # Need to somehow save the projection function
-        Pw = rep_W.equivariant_projector()
-        Pb = rep_bias.equivariant_projector()
+        Pw = rep_W.torch_equivariant_projector()
+        Pb = rep_bias.torch_equivariant_projector()
+
+        self.proj_b = lambda b: Pb @ b
+        self.proj_w = lambda w: (Pw @ w.reshape(-1)).reshape(nout, nin)
 
         # Produce dense projection matrices from the lazy projectors
-        dense_Pw = jax2torch(Pw.to_dense())
-        dense_Pb = jax2torch(Pb.to_dense())
+        # dense_Pw = jax2torch(Pw.to_dense())
+        # dense_Pb = jax2torch(Pb.to_dense())
 
         # Registers for projection matrices
-        self.register_buffer('dense_Pw', dense_Pw)
-        self.register_buffer('dense_Pb', dense_Pb)
+        # self.register_buffer('dense_Pw', dense_Pw)
+        # self.register_buffer('dense_Pb', dense_Pb)
 
         # dbg(dense_Pw.shape, dense_Pb.shape)
         # raise ValueError()
 
-        # dbg(type(Pw), Pw)
-        # dbg(type(Pb), Pb)
         # self.proj_b = torchify_fn(jit(lambda b: Pb @ b))
         # self.proj_w = torchify_fn(jit(lambda w: (Pw @ w.reshape(-1)).reshape(nout, nin)))
         logging.info(f"Linear W components:{rep_W.size()} rep:{rep_W}")
 
     def forward(self, x):  # (cin) -> (cout)
         # TODO: Port the projection to PyTorch
-        weight = (self.dense_Pw @ self.weight.reshape(-1)).reshape(self.out_features, self.in_features)
-        bias = self.dense_Pb @ self.bias
+        # weight = (self.dense_Pw @ self.weight.reshape(-1)).reshape(self.out_features, self.in_features)
+        # bias = self.dense_Pb @ self.bias
+        weight = self.proj_w(self.weight)
+        bias = self.proj_b(self.bias)
         return F.linear(x, weight, bias)
 
 
 @export
-class BiLinear(nn.Module):
+class EquivBiLinear(nn.Module):
     """ Cheap bilinear layer (adds parameters for each part of the input which can be
         interpreted as a linear map from a part of the input to the output representation)."""
 
     def __init__(self, repin, repout):
         super().__init__()
-        Wdim, weight_proj = bilinear_weights(repout, repin)
-        self.weight_proj = torchify_fn(jit(weight_proj))
+        Wdim, weight_proj = torch_bilinear_weights(repout, repin)
+        # self.weight_proj = torchify_fn(jit(weight_proj))
+        self.weight_proj = weight_proj
         self.bi_params = nn.Parameter(torch.randn(Wdim))
         logging.info(f"BiW components: dim:{Wdim}")
 
@@ -154,8 +161,8 @@ class EMLPBlock(nn.Module):
 
     def __init__(self, rep_in, rep_out):
         super().__init__()
-        self.linear = Linear(rep_in, gated(rep_out))
-        self.bilinear = BiLinear(gated(rep_out), gated(rep_out))
+        self.linear = EquivLinear(rep_in, gated(rep_out))
+        self.bilinear = EquivBiLinear(gated(rep_out), gated(rep_out))
         self.nonlinearity = GatedNonlinearity(rep_out)
 
     def forward(self, x):
@@ -201,7 +208,7 @@ class EMLP(nn.Module):
         # logging.info(f"Reps: {reps}")
         self.network = nn.Sequential(
             *[EMLPBlock(rin, rout) for rin, rout in zip(reps, reps[1:])],
-            Linear(reps[-1], self.rep_out)
+            EquivLinear(reps[-1], self.rep_out)
         )
 
     def forward(self, x):
