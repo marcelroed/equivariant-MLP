@@ -141,9 +141,9 @@ class Rep(object):
         Q = self.equivariant_basis()
         Q_lazy = lazify(Q)
         P = Q_lazy @ Q_lazy.H
-        print(f'For rep {self.__str__()}')
-        print('P = ', P.to_dense().shape)
-        print('Q = ', Q.shape)
+        # print(f'For rep {self.__str__()}')
+        # print('P = ', P.to_dense().shape)
+        # print('Q = ', Q.shape)
         return P
 
     @property
@@ -500,6 +500,40 @@ def sparsify_basis(Q, lr=1e-2):  # (n,r)
     return Q
 
 
+class TorchLazyProjection:
+    def __init__(self, W_multiplicities, x_multiplicities, nelems, reduced_indices_dict, inv_perm, mat_shape):
+        self.W_multiplicities = W_multiplicities
+        self.x_multiplicities = x_multiplicities
+        self.reduced_indices_dict = reduced_indices_dict
+        self.inv_perm = inv_perm
+        self.mat_shape = mat_shape
+
+    def __call__(self, params, x):
+        bshape = x.shape[:-1]
+        x = x.reshape(-1, x.shape[-1])
+        bs = x.shape[0]
+        i = 0
+        Ws = []
+        for rep, W_mult in self.W_multiplicities.items():
+            if rep not in self.x_multiplicities:
+                Ws.append(torch.zeros((bs, W_mult * rep.size()), device=x.device))
+                continue
+            x_mult = self.x_multiplicities[rep]
+            n = nelems(x_mult, rep)
+            i_end = i + W_mult * n
+            bids = self.reduced_indices_dict[rep]
+            bilinear_params = params[i:i_end].reshape(W_mult, n)  # bs,nK-> (nK,bs)
+            i = i_end  # (bs,W_mult,d^r) = (W_mult,n)@(n,d^r,bs)
+            bilinear_elems = bilinear_params @ x[..., bids].T.reshape(n, rep.size() * bs)
+            bilinear_elems = bilinear_elems.reshape(W_mult * rep.size(), bs).T
+            Ws.append(bilinear_elems)
+        Ws = torch.cat(Ws, dim=-1)  # concatenate over rep axis
+        return Ws[..., self.inv_perm].reshape(*bshape, *self.mat_shape)  # reorder to original rank ordering
+
+
+def nelems(nx, rep):
+    return min(nx, rep.size())
+
 # @partial(jit,static_argnums=(0,1))
 @export
 def torch_bilinear_weights(out_rep, in_rep):
@@ -512,34 +546,34 @@ def torch_bilinear_weights(out_rep, in_rep):
     W_multiplicities = W_rep.reps
     x_multiplicities = x_rep.reps
     x_multiplicities = {rep: n for rep, n in x_multiplicities.items() if rep != Scalar}
-    nelems = lambda nx, rep: min(nx, rep.size())
     active_dims = sum([W_multiplicities.get(rep, 0) * nelems(n, rep) for rep, n in x_multiplicities.items()])
     reduced_indices_dict = {rep: ids[np.random.choice(len(ids), nelems(len(ids), rep))].reshape(-1) \
                             for rep, ids in x_rep.as_dict(np.arange(x_rep.size())).items()}
 
     # Apply the projections for each rank, concatenate, and permute back to orig rank order
     # @torch.jit.script
-    def lazy_projection(params, x):  # (r,), (*c) #TODO: find out why backwards of this function is so slow
-        bshape = x.shape[:-1]
-        x = x.reshape(-1, x.shape[-1])
-        bs = x.shape[0]
-        i = 0
-        Ws = []
-        for rep, W_mult in W_multiplicities.items():
-            if rep not in x_multiplicities:
-                Ws.append(torch.zeros((bs, W_mult * rep.size()), device=x.device))
-                continue
-            x_mult = x_multiplicities[rep]
-            n = nelems(x_mult, rep)
-            i_end = i + W_mult * n
-            bids = reduced_indices_dict[rep]
-            bilinear_params = params[i:i_end].reshape(W_mult, n)  # bs,nK-> (nK,bs)
-            i = i_end  # (bs,W_mult,d^r) = (W_mult,n)@(n,d^r,bs)
-            bilinear_elems = bilinear_params @ x[..., bids].T.reshape(n, rep.size() * bs)
-            bilinear_elems = bilinear_elems.reshape(W_mult * rep.size(), bs).T
-            Ws.append(bilinear_elems)
-        Ws = torch.cat(Ws, dim=-1)  # concatenate over rep axis
-        return Ws[..., inv_perm].reshape(*bshape, *mat_shape)  # reorder to original rank ordering
+    # def lazy_projection(params, x):  # (r,), (*c) #TODO: find out why backwards of this function is so slow
+    #     bshape = x.shape[:-1]
+    #     x = x.reshape(-1, x.shape[-1])
+    #     bs = x.shape[0]
+    #     i = 0
+    #     Ws = []
+    #     for rep, W_mult in W_multiplicities.items():
+    #         if rep not in x_multiplicities:
+    #             Ws.append(torch.zeros((bs, W_mult * rep.size()), device=x.device))
+    #             continue
+    #         x_mult = x_multiplicities[rep]
+    #         n = nelems(x_mult, rep)
+    #         i_end = i + W_mult * n
+    #         bids = reduced_indices_dict[rep]
+    #         bilinear_params = params[i:i_end].reshape(W_mult, n)  # bs,nK-> (nK,bs)
+    #         i = i_end  # (bs,W_mult,d^r) = (W_mult,n)@(n,d^r,bs)
+    #         bilinear_elems = bilinear_params @ x[..., bids].T.reshape(n, rep.size() * bs)
+    #         bilinear_elems = bilinear_elems.reshape(W_mult * rep.size(), bs).T
+    #         Ws.append(bilinear_elems)
+    #     Ws = torch.cat(Ws, dim=-1)  # concatenate over rep axis
+    #     return Ws[..., inv_perm].reshape(*bshape, *mat_shape)  # reorder to original rank ordering
+    lazy_projection = TorchLazyProjection(W_multiplicities, x_multiplicities, nelems, reduced_indices_dict, inv_perm, mat_shape)
 
     return active_dims, lazy_projection
 

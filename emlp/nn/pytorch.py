@@ -82,17 +82,23 @@ def ensure_sum_rep(rep):
 class EquivLinear(nn.Linear):
     """ Basic equivariant Linear layer from repin to repout."""
 
+    def proj_b(self, b):
+        return self.Pb @ b
+
+    def proj_w(self, w):
+        return (self.Pw @ w.reshape(-1)).reshape(self.nout, self.nin)
+
     def __init__(self, repin, repout):
-        nin, nout = repin.size(), repout.size()
-        super().__init__(nin, nout)
+        self.nin, self.nout = repin.size(), repout.size()
+        super().__init__(self.nin, self.nout)
         rep_W = ensure_sum_rep(repout * repin.T)
         rep_bias = ensure_sum_rep(repout)
         # Need to somehow save the projection function
-        Pw = rep_W.torch_equivariant_projector()
-        Pb = rep_bias.torch_equivariant_projector()
+        self.Pw = rep_W.torch_equivariant_projector()
+        self.Pb = rep_bias.torch_equivariant_projector()
 
-        self.proj_b = lambda b: Pb @ b
-        self.proj_w = lambda w: (Pw @ w.reshape(-1)).reshape(nout, nin)
+        # self.proj_b = lambda b: Pb @ b
+        # self.proj_w = lambda w: (Pw @ w.reshape(-1)).reshape(nout, nin)
 
         # Produce dense projection matrices from the lazy projectors
         # dense_Pw = jax2torch(Pw.to_dense())
@@ -116,6 +122,63 @@ class EquivLinear(nn.Linear):
         weight = self.proj_w(self.weight)
         bias = self.proj_b(self.bias)
         return F.linear(x, weight, bias)
+
+
+@export
+class SeparatedEquivLinear(nn.Linear):
+    """ Basic equivariant Linear layer from repin to repout."""
+
+    def proj_b(self, b):
+        return self.Pb @ b
+
+    def proj_w(self, w):
+        return (self.Pw @ w.reshape(-1)).reshape(self.nout, self.nin)
+
+    def __init__(self, repin, repout):
+        self.nin, self.nout = repin.size(), repout.size()
+        super().__init__(self.nin, self.nout)
+        rep_W = ensure_sum_rep(repout * repin.T)
+        rep_bias = ensure_sum_rep(repout)
+        # Need to somehow save the projection function
+        self.Pw = rep_W.torch_equivariant_projector()
+        self.Pb = rep_bias.torch_equivariant_projector()
+
+        # self.proj_b = lambda b: Pb @ b
+        # self.proj_w = lambda w: (Pw @ w.reshape(-1)).reshape(nout, nin)
+
+        # Produce dense projection matrices from the lazy projectors
+        # dense_Pw = jax2torch(Pw.to_dense())
+        # dense_Pb = jax2torch(Pb.to_dense())
+
+        # Registers for projection matrices
+        # self.register_buffer('dense_Pw', dense_Pw)
+        # self.register_buffer('dense_Pb', dense_Pb)
+
+        # dbg(dense_Pw.shape, dense_Pb.shape)
+        # raise ValueError()
+
+        # self.proj_b = torchify_fn(jit(lambda b: Pb @ b))
+        # self.proj_w = torchify_fn(jit(lambda w: (Pw @ w.reshape(-1)).reshape(nout, nin)))
+        logging.info(f"Linear W components:{rep_W.size()} rep:{rep_W}")
+
+    def forward(self, x, shape_rep):
+        # x: (batch, n_points, 3)
+        # shape_rep: (batch, z_dim)
+        # weight = (self.dense_Pw @ self.weight.reshape(-1)).reshape(self.out_features, self.in_features)
+        # bias = self.dense_Pb @ self.bias
+
+        weight = self.proj_w(self.weight)
+        bias = self.proj_b(self.bias)
+
+        # Slice the weight matrix according to the size of the x and the shape_rep
+        left_weight = weight[:, :x.shape[2]]
+        right_weight = weight[:, x.shape[2]:]
+
+        left = F.linear(x, left_weight)
+        right = F.linear(shape_rep, right_weight)
+        right_expanded = right.view(left.shape[0], 1, left.shape[2]).expand(-1, x.shape[1], -1)
+        return left + right_expanded + bias
+        # return F.linear(x, weight, bias)
 
 
 @export
@@ -172,8 +235,70 @@ class EMLPBlock(nn.Module):
 
 
 @export
+class SeparatedEMLPBlock(nn.Module):
+    """ Basic building block of EMLP consisting of G-Linear, biLinear,
+        and gated nonlinearity. """
+
+    def __init__(self, rep_in, rep_out):
+        super().__init__()
+        self.linear = SeparatedEquivLinear(rep_in, gated(rep_out))
+        self.bilinear = EquivBiLinear(gated(rep_out), gated(rep_out))
+        self.nonlinearity = GatedNonlinearity(rep_out)
+
+    def forward(self, x_tuple):
+        points, shape_rep = x_tuple
+        lin = self.linear(points, shape_rep)
+        preact = self.bilinear(lin) + lin
+        return self.nonlinearity(preact)
+
+
+@export
 class EMLP(nn.Module):
     """ Equivariant MultiLayer Perceptron. 
+        If the input ch argument is an int, uses the hands off uniform_rep heuristic.
+        If the ch argument is a representation, uses this representation for the hidden layers.
+        Individual layer representations can be set explicitly by using a list of ints or a list of
+        representations, rather than use the same for each hidden layer.
+
+        Args:
+            rep_in (Rep): input representation
+            rep_out (Rep): output representation
+            group (Group): symmetry group
+            ch (int or list[int] or Rep or list[Rep]): number of channels in the hidden layers
+            num_layers (int): number of hidden layers
+
+        Returns:
+            Module: the EMLP objax module."""
+
+    def __init__(self, rep_in, rep_out, group, ch=384, num_layers=3, separate_first=False):
+        super().__init__()
+        logging.info("Initing EMLP (PyTorch)")
+        self.rep_in = rep_in(group)
+        self.rep_out = rep_out(group)
+
+        self.G = group
+        # Parse ch as a single int, a sequence of ints, a single Rep, a sequence of Reps
+        if isinstance(ch, int):
+            middle_layers = num_layers * [uniform_rep(ch, group)]  # [uniform_rep(ch,group) for _ in range(num_layers)]
+        elif isinstance(ch, Rep):
+            middle_layers = num_layers * [ch(group)]
+        else:
+            middle_layers = [(c(group) if isinstance(c, Rep) else uniform_rep(c, group)) for c in ch]
+        # assert all((not rep.G is None) for rep in middle_layers[0].reps)
+        reps = [self.rep_in] + middle_layers
+        # logging.info(f"Reps: {reps}")
+        self.network = nn.Sequential(
+            *[EMLPBlock(rin, rout) for rin, rout in zip(reps, reps[1:])],
+            EquivLinear(reps[-1], self.rep_out)
+        )
+
+    def forward(self, x):
+        return self.network(x)
+
+
+@export
+class SeparatedEMLP(nn.Module):
+    """ Equivariant MultiLayer Perceptron.
         If the input ch argument is an int, uses the hands off uniform_rep heuristic.
         If the ch argument is a representation, uses this representation for the hidden layers.
         Individual layer representations can be set explicitly by using a list of ints or a list of
@@ -207,13 +332,13 @@ class EMLP(nn.Module):
         reps = [self.rep_in] + middle_layers
         # logging.info(f"Reps: {reps}")
         self.network = nn.Sequential(
-            *[EMLPBlock(rin, rout) for rin, rout in zip(reps, reps[1:])],
+            SeparatedEMLPBlock(reps[0], reps[1]),
+            *[EMLPBlock(rin, rout) for rin, rout in zip(reps[1:], reps[2:])],
             EquivLinear(reps[-1], self.rep_out)
         )
 
-    def forward(self, x):
-        return self.network(x)
-
+    def forward(self, x_tuple):
+        return self.network(x_tuple)
 
 class Swish(nn.Module):
     def forward(self, x):

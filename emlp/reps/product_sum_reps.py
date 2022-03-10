@@ -12,6 +12,16 @@ from collections import defaultdict
 from plum import dispatch
 from emlp.utils import memory
 
+class TorchLazyP:
+    def __init__(self, Ps_values, multiplicities, perm, invperm):
+        self.Ps_values = Ps_values
+        self.multiplicities = multiplicities
+        self.perm = perm
+        self.invperm = invperm
+
+    def __call__(self, array):
+        return torch_lazy_direct_matmat(array[self.perm], self.Ps_values, self.multiplicities)[self.invperm]
+
 
 class SumRep(Rep):
     def __init__(self, *reps, extra_perm=None):  # repcounter,repperm=None):
@@ -106,10 +116,12 @@ class SumRep(Rep):
         """ Overrides default implementation with a more efficient version which decomposes the constraints
             across the sum."""
         Ps = {rep: rep.equivariant_projector() for rep in self.reps}
-        multiplicities = self.reps.values()
+        multiplicities = list(self.reps.values())
 
-        def lazy_P(array):
-            return torch_lazy_direct_matmat(array[self.perm], Ps.values(), multiplicities)[self.invperm]  # [:,self.invperm]
+        # def lazy_P(array):
+        #     return torch_lazy_direct_matmat(array[self.perm], Ps.values(), multiplicities)[self.invperm]  # [:,self.invperm]
+
+        lazy_P = TorchLazyP(list(Ps.values()), multiplicities, self.perm, self.invperm)
 
         return LinearOperator(shape=(self.size(), self.size()), matvec=lazy_P, matmat=lazy_P)
 

@@ -9,6 +9,7 @@ from tempfile import gettempdir
 
 # Cross-platform location for joblib memory
 memory = Memory(cachedir=gettempdir(), verbose=1)
+# memory.clear()
 
 
 class Named(type):

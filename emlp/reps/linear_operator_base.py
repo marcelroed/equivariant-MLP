@@ -41,6 +41,8 @@ __all__ = ['LinearOperator', 'aslinearoperator']
 
 import torch
 
+from emlp.utils import dbg
+
 
 class LinearOperator(object):
     """Common interface for performing matrix vector products
@@ -138,8 +140,8 @@ class LinearOperator(object):
         To be called by subclasses. ``dtype`` may be None; ``shape`` should
         be convertible to a length-2 tuple.
         """
-        if dtype is not None:
-            dtype = np.dtype(dtype)
+        # if dtype is not None:
+        #     dtype = np.dtype(dtype)
 
         shape = tuple(shape)
         if not isshape(shape):
@@ -734,10 +736,21 @@ class IdentityOperator(LinearOperator):
 
 class Lazy(LinearOperator):
     def __init__(self, dense_matrix):
-        # if isinstance(dense_matrix, np.ndarray):
-        #     dense_matrix = torch.tensor(dense_matrix)
-        self.A = dense_matrix
+        self.A = dense_matrix  # Retain also the dense array
+        self._A_torch = None
         super().__init__(self.A.dtype, self.A.shape)
+
+    def get_A_torch(self, device):
+        if self._A_torch is not None:
+            return self._A_torch
+        if isinstance(self.A, onp.ndarray):
+            dbg('Lazy: dense_matrix is a numpy array, converting to Tensor')
+            self._A_torch = torch.tensor(self.A, device=device)
+        elif isinstance(self.A, np.DeviceArray):
+            dbg('Lazy: dense_matrix is a DeviceArray, converting to Tensor')
+            self._A_torch = torch.tensor(onp.asarray(self.A), device=device)
+
+        return self._A_torch
 
     def as_torch_lazy(self):
         if isinstance(self.A, np.ndarray):
@@ -746,22 +759,30 @@ class Lazy(LinearOperator):
             raise NotImplementedError(f'Not implemented for {type(self.A)}')
 
     def _matmat(self, V):
+        if isinstance(V, torch.Tensor):
+            return self.get_A_torch(V.device) @ V
         return self.A @ V
 
     def _matvec(self, v):
+        if isinstance(v, torch.Tensor):
+            return self.get_A_torch(v.device) @ v
         return self.A @ v
 
     def _rmatmat(self, V):
+        if isinstance(V, torch.Tensor):
+            return self.get_A_torch(V.device).T @ V
         return self.A.T @ V
 
     def _rmatvec(self, v):
+        if isinstance(v, torch.Tensor):
+            return self.get_A_torch(v.device).T @ v
         return self.A.T @ v
 
     def to_dense(self):
         return self.A
 
     def invT(self):
-        return Lazy(torch.linalg.inv(self.A).T)
+        return Lazy(np.linalg.inv(self.A).T)
 
 
 # def aslinearoperator(A):
