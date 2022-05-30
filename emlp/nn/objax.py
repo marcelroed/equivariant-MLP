@@ -66,6 +66,7 @@ class BiLinear(Module):
 
     def __call__(self, x, training=True):
         # compatible with non sumreps? need to check
+        # Bilinear = B(x, y) = x^T A y
         W = self.weight_proj(self.w.value, x)
         out = .1 * (W @ x[..., None])[..., 0]
         return out

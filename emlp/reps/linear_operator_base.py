@@ -744,10 +744,10 @@ class Lazy(LinearOperator):
         if self._A_torch is not None:
             return self._A_torch
         if isinstance(self.A, onp.ndarray):
-            dbg('Lazy: dense_matrix is a numpy array, converting to Tensor')
+            # dbg('Lazy: dense_matrix is a numpy array, converting to Tensor')
             self._A_torch = torch.tensor(self.A, device=device)
         elif isinstance(self.A, np.DeviceArray):
-            dbg('Lazy: dense_matrix is a DeviceArray, converting to Tensor')
+            # dbg('Lazy: dense_matrix is a DeviceArray, converting to Tensor')
             self._A_torch = torch.tensor(onp.asarray(self.A), device=device)
 
         return self._A_torch

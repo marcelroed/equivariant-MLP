@@ -1,5 +1,5 @@
 
-import numpy as np#
+import numpy as np
 import copy
 from emlp.reps import *
 from emlp.groups import *

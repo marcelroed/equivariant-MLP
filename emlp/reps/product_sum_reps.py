@@ -12,6 +12,7 @@ from collections import defaultdict
 from plum import dispatch
 from emlp.utils import memory
 
+
 class TorchLazyP:
     def __init__(self, Ps_values, multiplicities, perm, invperm):
         self.Ps_values = Ps_values
